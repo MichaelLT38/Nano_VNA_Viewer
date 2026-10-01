@@ -71,8 +71,10 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
 - [~] Test on clean Windows and Linux machines
   - Done: unzipped Windows build run from a fresh folder; Linux build tested in WSL Ubuntu 22.04
     (offscreen + Wayland); all 165 tests pass on both
-  - Still to do: a machine without Python, and the packaged build with a NanoVNA
+  - Packaged Windows build swept the real NanoVNA; release download (built by GitHub Actions)
+    verified to start. Still to do: a machine that has never had Python installed
+  - Windows needs the unzip path short enough for Qt's plugins (<260 chars; documented)
 - [x] Write the final README (install, usage, screenshots)
-- [ ] Publish a GitHub release with both builds
-  - GitHub Actions workflow ready (`.github/workflows/build.yml`): tests + builds on push,
-    publishes a release on a `v*` tag. Needs the repo pushed to GitHub.
+- [x] Publish a GitHub release with both builds
+  - v0.1.0: https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.1.0
+  - `.github/workflows/build.yml` tests + builds on every push and publishes a release on a `v*` tag

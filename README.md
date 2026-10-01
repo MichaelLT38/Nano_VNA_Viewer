@@ -34,6 +34,10 @@ is needed.
 The app isn't code-signed, so Windows SmartScreen may say "Windows protected your PC".
 Click **More info → Run anyway**.
 
+If it fails with "no Qt platform plugin could be initialized", the folder is nested too deeply:
+some files inside exceed Windows' 260-character path limit. Move the `NanoVNAViewer` folder
+somewhere shorter, such as `Downloads` or `C:\Programs`.
+
 ### Linux (x86-64)
 
 ```bash
