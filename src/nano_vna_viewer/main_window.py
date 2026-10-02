@@ -23,7 +23,7 @@ from . import __version__
 from .device_panel import DevicePanel
 from .export import write_csv
 from .plots import PlotPanel, format_vswr
-from .rf import s_db, vswr
+from .rf import BAND_VSWR_LIMIT, min_vswr_index, s_db, vswr
 from .touchstone import (
     Measurement,
     TouchstoneError,
@@ -41,6 +41,27 @@ FILE_FILTER = "Touchstone files (*.s1p *.s2p *.S1P *.S2P);;All files (*)"
 PNG_FILTER = "PNG images (*.png *.PNG)"
 CSV_FILTER = "CSV files (*.csv *.CSV)"
 NO_VALUE = "—"
+
+
+def best_match_text(m: Measurement) -> str:
+    """The minimum VSWR and where it is, e.g. '1.336 at 274.05 MHz  (S11 -16.84 dB)'."""
+    i = min_vswr_index(m.s11)
+    best = m.s11[i : i + 1]
+    return (
+        f"{format_vswr(vswr(best)[0])} at {format_frequency(m.frequency_hz[i])}"
+        f"  (S11 {s_db(best)[0]:.2f} dB)"
+    )
+
+
+def band_text(m: Measurement, band: tuple[float | None, float | None] | None) -> str:
+    """Describe the matched band from ``rf.vswr_band``; an edge outside the sweep is None."""
+    if band is None:
+        return "none"
+    low, high = band
+    low_text = f"below {format_frequency(m.start_hz)}" if low is None else format_frequency(low)
+    high_text = f"above {format_frequency(m.stop_hz)}" if high is None else format_frequency(high)
+    width = "" if low is None or high is None else f"  ({format_frequency(high - low)} wide)"
+    return f"{low_text} to {high_text}{width}"
 
 
 class MainWindow(QMainWindow):
@@ -87,9 +108,6 @@ class MainWindow(QMainWindow):
         self.export_csv_action.triggered.connect(self.choose_csv_export)
         file_menu.addAction(self.export_csv_action)
 
-        for action in self._data_actions():
-            action.setEnabled(False)  # until data is loaded
-
         file_menu.addSeparator()
 
         self.exit_action = QAction("E&xit", self)
@@ -116,10 +134,30 @@ class MainWindow(QMainWindow):
         self.smooth_action.toggled.connect(self.set_smoothing)
         view_menu.addAction(self.smooth_action)
 
+        view_menu.addSeparator()
+
+        # The reference is a second, grey trace kept on screen to compare against.
+        self.hold_reference_action = QAction("&Hold Trace as Reference", self)
+        self.hold_reference_action.setShortcut("Ctrl+R")
+        self.hold_reference_action.triggered.connect(self.hold_reference)
+        view_menu.addAction(self.hold_reference_action)
+
+        self.load_reference_action = QAction("&Load Reference File…", self)
+        self.load_reference_action.triggered.connect(self.choose_reference_file)
+        view_menu.addAction(self.load_reference_action)
+
+        self.clear_reference_action = QAction("&Clear Reference", self)
+        self.clear_reference_action.triggered.connect(lambda: self.set_reference(None))
+        self.clear_reference_action.setEnabled(False)  # until there is one
+        view_menu.addAction(self.clear_reference_action)
+
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About", self)
         about_action.triggered.connect(self._show_about)
         help_menu.addAction(about_action)
+
+        for action in self._data_actions():
+            action.setEnabled(False)  # until data is loaded
 
     def _build_central_widget(self) -> None:
         self.file_label = QLabel(NO_VALUE)
@@ -128,6 +166,8 @@ class MainWindow(QMainWindow):
         self.points_label = QLabel(NO_VALUE)
         self.z0_label = QLabel(NO_VALUE)
         self.min_vswr_label = QLabel(NO_VALUE)
+        self.band_label = QLabel(NO_VALUE)
+        self.reference_label = QLabel(NO_VALUE)
         for label in (
             self.file_label,
             self.ports_label,
@@ -135,6 +175,8 @@ class MainWindow(QMainWindow):
             self.points_label,
             self.z0_label,
             self.min_vswr_label,
+            self.band_label,
+            self.reference_label,
         ):
             label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
 
@@ -145,6 +187,8 @@ class MainWindow(QMainWindow):
         info.addRow("Points:", self.points_label)
         info.addRow("Reference impedance:", self.z0_label)
         info.addRow("Minimum VSWR:", self.min_vswr_label)
+        info.addRow(f"VSWR ≤ {BAND_VSWR_LIMIT:g} band:", self.band_label)
+        info.addRow("Reference trace:", self.reference_label)
 
         self.plots = PlotPanel()
 
@@ -212,14 +256,42 @@ class MainWindow(QMainWindow):
         self.z0_label.setText(format_impedance(m.z0))
         self.plots.set_measurement(m, keep_view=keep_view)
 
-        i = self.plots.min_vswr_index
-        best = m.s11[i : i + 1]
-        self.min_vswr_label.setText(
-            f"{format_vswr(vswr(best)[0])} at {format_frequency(m.frequency_hz[i])}"
-            f"  (S11 {s_db(best)[0]:.2f} dB)"
-        )
+        self.min_vswr_label.setText(best_match_text(m))
+        self.band_label.setText(band_text(m, self.plots.vswr_band))
         for action in self._data_actions():
             action.setEnabled(True)
+
+    def hold_reference(self) -> None:
+        """Keep the trace now on screen as the reference."""
+        if self.measurement is not None:
+            self.set_reference(self.measurement)
+            self.statusBar().showMessage(f"Holding {self.measurement.name} as the reference")
+
+    def choose_reference_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Reference File", self.start_dir(), FILE_FILTER
+        )
+        if path:
+            self.load_reference(path)
+
+    def load_reference(self, path: str | Path) -> bool:
+        """Load a file as the reference, leaving the displayed data as it is. True on success."""
+        try:
+            reference = load_touchstone(path)
+        except TouchstoneError as exc:
+            self.show_error(str(exc), title="Could not load reference")
+            return False
+        self.set_reference(reference)
+        self.statusBar().showMessage(f"Loaded {reference.name} as the reference")
+        return True
+
+    def set_reference(self, m: Measurement | None) -> None:
+        """Show a measurement as the grey comparison trace, or remove it with None."""
+        self.plots.set_memory(m)
+        self.reference_label.setText(
+            NO_VALUE if m is None else f"{m.name}: minimum VSWR {best_match_text(m)}"
+        )
+        self.clear_reference_action.setEnabled(m is not None)
 
     def set_smoothing(self, enabled: bool) -> None:
         """Switch curve smoothing on or off, and remember the choice."""
@@ -228,7 +300,12 @@ class MainWindow(QMainWindow):
 
     def _data_actions(self) -> tuple[QAction, ...]:
         """Actions that need loaded data."""
-        return (self.save_touchstone_action, self.export_png_action, self.export_csv_action)
+        return (
+            self.save_touchstone_action,
+            self.export_png_action,
+            self.export_csv_action,
+            self.hold_reference_action,
+        )
 
     def _default_stem(self) -> str:
         """Base file name for saving: the loaded file's name, or a timestamp for live data."""

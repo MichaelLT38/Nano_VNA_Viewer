@@ -12,9 +12,13 @@ It replaces the LabVIEW-based Nano VNA LabVIEW Viewer and needs no LabVIEW, NI r
 - **Plots:** return loss, VSWR, phase, and a Smith chart (with an optional admittance-grid
   overlay). Two-port data adds a Transmission tab for S21 magnitude and phase. Optional curve
   smoothing between the measured points.
-- **Marker:** click or drag to read frequency, S11, VSWR, and impedance (R + jX) at any point.
-  The minimum-VSWR point is marked automatically.
-- **Live NanoVNA:** single or continuous sweeps over any range; save sweeps as Touchstone files.
+- **Marker:** click or drag to read frequency, S11, VSWR, impedance (R + jX), and the
+  equivalent series inductor or capacitor at any point. The minimum-VSWR point is marked
+  automatically, and the band where VSWR stays at or below 2 is shaded and listed.
+- **Reference trace:** hold a sweep or load a file as a grey second trace, to compare before
+  and after an adjustment.
+- **Live NanoVNA:** single or continuous sweeps over any range, split into segments for more
+  points than the device gives in one scan; save sweeps as Touchstone files.
 - **Export:** plots as PNG, data as CSV.
 - Follows the system light/dark theme.
 
@@ -67,6 +71,14 @@ sudo usermod -aG dialout $USER
   command line: `NanoVNAViewer data.s1p`.
 - Click a plot or drag the pink marker to read values at that point. The dashed green line marks
   the minimum VSWR; **View → Go to Minimum VSWR** (Ctrl+M) jumps back to it.
+- The readout shows the impedance at the marker and the series component with the same
+  reactance at that frequency, for example `51.27 − j14.67 Ω (series 39.7 pF)`.
+- The green shading on the Return Loss and VSWR tabs is the band around the best match where
+  VSWR is 2 or less; its edges and width are listed above the plots. The edges are estimated
+  between measured points, so they are only as fine as the sweep.
+- **View → Hold Trace as Reference** (Ctrl+R) keeps the current trace on screen in grey while
+  you open another file or sweep again. **Load Reference File** uses a saved file instead, and
+  **Clear Reference** removes it. The reference is for comparison only and is never exported.
 - Scroll to zoom, drag to pan, **View → Reset Zoom** (Ctrl+0) to fit.
 - **View → Smooth Curves** draws a smooth curve through the measured points, which are then
   shown as dots. It only changes how the line is drawn: the marker, the readouts, and exported
@@ -82,6 +94,9 @@ sudo usermod -aG dialout $USER
    Start, Stop, and Points fill in from the device's current sweep.
 3. Click **Single Sweep**, or **Continuous** to sweep repeatedly (zoom and marker are kept
    between sweeps of the same range).
+   For more points than the device gives in one scan, raise **Segments**: the range is
+   measured in that many scans and stitched into one sweep (5 segments of 101 points give
+   505 points, and take about 5 times as long).
 4. **File → Save Sweep as Touchstone** (Ctrl+S) saves a `.s2p` (S11 and S21) in the
    NanoVNA's own format.
 

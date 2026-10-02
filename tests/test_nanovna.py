@@ -139,6 +139,59 @@ def test_scan_validates_before_sending(vna, fake, start, stop, points, message):
     assert fake.commands == sent  # nothing reached the device
 
 
+def test_segmented_scan_stitches_one_even_sweep(vna, fake):
+    m = vna.scan_segments(100_000_000, 500_000_000, 101, 3)
+    f = m.frequency_hz
+    assert m.points == 303
+    assert f[0] == 100e6 and f[-1] == 500e6
+    assert np.all(np.diff(f) > 0)
+    # One even grid across the segments (the device rounds each frequency to 1 Hz).
+    np.testing.assert_allclose(np.diff(f), 400e6 / 302, atol=2)
+    np.testing.assert_allclose(m.s11, fake_s11(f), atol=1e-9)
+    np.testing.assert_allclose(m.s21, fake_s21(f), atol=1e-9)
+    # Paused once, then only scans: the pattern that is safe on real firmware.
+    assert fake.commands.count("pause") == 1
+    scans = fake.commands[-3:]
+    assert all(c.startswith("scan ") and c.endswith(" 101 7") for c in scans)
+    assert scans[0].split()[1] == "100000000" and scans[-1].split()[2] == "500000000"
+
+
+def test_segmented_scan_reports_progress(vna):
+    calls = []
+    vna.scan_segments(100_000_000, 500_000_000, 21, 3, on_segment=lambda *a: calls.append(a))
+    assert calls == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_one_segment_is_a_plain_scan(vna, fake):
+    calls = []
+    m = vna.scan_segments(100_000_000, 500_000_000, 21, 1, on_segment=lambda *a: calls.append(a))
+    assert m.points == 21
+    assert fake.commands[-1] == "scan 100000000 500000000 21 7"
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "start, stop, points, segments, message",
+    [
+        (1_000_000, 1_000_100, 101, 3, "too narrow for 303 points"),
+        (100_000_000, 500_000_000, 101, 0, "at least 1"),
+        (500_000_000, 100_000_000, 101, 3, "below stop"),
+        (100_000_000, 500_000_000, 102, 3, "between 2 and 101"),
+    ],
+)
+def test_segmented_scan_validates_before_sending(vna, fake, start, stop, points, segments, message):
+    sent = list(fake.commands)
+    with pytest.raises(NanoVNAError, match=message):
+        vna.scan_segments(start, stop, points, segments)
+    assert fake.commands == sent  # nothing reached the device
+
+
+def test_segmented_scan_fails_as_a_whole(vna, fake):
+    fake.scan_line_count = 5
+    with pytest.raises(NanoVNAError, match="Expected 21 points"):
+        vna.scan_segments(100_000_000, 500_000_000, 21, 3)
+
+
 def test_rejected_command(vna):
     with pytest.raises(NanoVNAError, match="rejected 'bogus': bogus\\?"):
         vna.command("bogus")
@@ -191,5 +244,9 @@ def test_real_device(monkeypatch):
             m = vna.scan(100_000_000, 200_000_000, points)
             assert m.points == points
             assert np.all(np.abs(m.s11) < 1.5)
+        m = vna.scan_segments(100_000_000, 200_000_000, 101, 3)
+        assert m.points == 303
+        assert np.all(np.diff(m.frequency_hz) > 0)
+        assert np.all(np.abs(m.s11) < 1.5)
     with NanoVNA(port) as vna:  # reconnect: device restored
         assert vna.get_sweep() == before

@@ -11,6 +11,9 @@ _MIN_MAGNITUDE = 1e-12
 # Drawn segments per measured interval when curve smoothing is on.
 SMOOTHING_FACTOR = 10
 
+# A VSWR at or below this counts as matched, for the bandwidth readout.
+BAND_VSWR_LIMIT = 2.0
+
 
 def s_db(s: np.ndarray) -> np.ndarray:
     """Log magnitude, 20·log10|S|, in dB."""
@@ -47,6 +50,36 @@ def impedance(s11: np.ndarray, z0: complex) -> np.ndarray:
 def min_vswr_index(s11: np.ndarray) -> int:
     """Index of the best match (lowest |S11|, hence lowest VSWR)."""
     return int(np.argmin(np.abs(s11)))
+
+
+def vswr_band(
+    frequency: np.ndarray, s11: np.ndarray, limit: float = BAND_VSWR_LIMIT
+) -> tuple[float | None, float | None] | None:
+    """The band around the best match where VSWR stays at or below ``limit``, as (low, high) in Hz.
+
+    Each edge is where |S11| crosses the limit, placed by linear interpolation between
+    the measured points either side of the crossing. An edge is None when the band runs
+    past that end of the sweep. Returns None when even the best match is above the limit.
+    """
+    mag = np.abs(s11)
+    threshold = (limit - 1) / (limit + 1)
+    best = min_vswr_index(s11)
+    if not mag[best] <= threshold:
+        return None
+
+    def edge(step: int) -> float | None:
+        inside = best
+        while 0 <= inside + step < len(mag) and mag[inside + step] <= threshold:
+            inside += step
+        outside = inside + step
+        if not 0 <= outside < len(mag):
+            return None
+        if not np.isfinite(mag[outside]):
+            return float(frequency[inside])
+        fraction = (threshold - mag[inside]) / (mag[outside] - mag[inside])
+        return float(frequency[inside] + fraction * (frequency[outside] - frequency[inside]))
+
+    return edge(-1), edge(1)
 
 
 def interpolate_s(

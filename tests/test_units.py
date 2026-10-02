@@ -1,6 +1,6 @@
 import pytest
 
-from nano_vna_viewer.units import format_frequency, format_impedance
+from nano_vna_viewer.units import format_frequency, format_impedance, format_series_component
 
 
 @pytest.mark.parametrize(
@@ -43,3 +43,21 @@ def test_format_impedance(z, expected):
 )
 def test_format_impedance_fixed_decimals(z, expected):
     assert format_impedance(z, decimals=2) == expected
+
+
+@pytest.mark.parametrize(
+    "reactance, hz, expected",
+    [
+        (-53.18, 342.031e6, "8.75 pF"),  # C = 1 / (2π · 342.031 MHz · 53.18 Ω)
+        (-28.71, 540.02e6, "10.3 pF"),
+        (100, 145e6, "110 nH"),  # L = 100 Ω / (2π · 145 MHz)
+        (50, 1e6, "7.96 µH"),
+        (-1, 100, "1.59 mF"),
+        (0, 1e6, ""),
+        (float("inf"), 1e6, ""),
+        (float("nan"), 1e6, ""),
+        (50, 0, ""),
+    ],
+)
+def test_format_series_component(reactance, hz, expected):
+    assert format_series_component(reactance, hz) == expected

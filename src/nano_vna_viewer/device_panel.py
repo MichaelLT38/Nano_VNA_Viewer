@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from .nanovna import ConnectionLost, NanoVNA, NanoVNAError, PortInfo, SweepSettings, find_ports
 
 MHZ = 1e6
+MAX_SEGMENTS = 20
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class DeviceWorker(QObject):
 
     connected = Signal(object)  # DeviceInfo
     swept = Signal(object, float)  # Measurement, seconds taken
+    progress = Signal(int, int)  # segments done, segments in the sweep
     failed = Signal(str)
     disconnected = Signal()
 
@@ -64,14 +66,16 @@ class DeviceWorker(QObject):
             DeviceInfo(port, device.board, device.version, device.max_points, settings)
         )
 
-    @Slot(int, int, int)
-    def run_sweep(self, start_hz: int, stop_hz: int, points: int) -> None:
+    @Slot(int, int, int, int)
+    def run_sweep(self, start_hz: int, stop_hz: int, points: int, segments: int) -> None:
         if self._device is None:
             self.failed.emit("Not connected to a NanoVNA.")
             return
         started = time.monotonic()
         try:
-            measurement = self._device.scan(start_hz, stop_hz, points)
+            measurement = self._device.scan_segments(
+                start_hz, stop_hz, points, segments, on_segment=self.progress.emit
+            )
         except ConnectionLost as exc:
             self._close_device()
             self.failed.emit(str(exc))
@@ -94,7 +98,7 @@ class DeviceWorker(QObject):
 
 
 class DevicePanel(QGroupBox):
-    """Port selection, sweep range, and sweep buttons."""
+    """Port selection, sweep range, segments, and sweep buttons."""
 
     measurement_ready = Signal(object, bool)  # Measurement, part of a continuous run
     error = Signal(str)
@@ -102,7 +106,7 @@ class DevicePanel(QGroupBox):
 
     # Requests to the worker (queued across threads).
     _open_requested = Signal(str)
-    _sweep_requested = Signal(int, int, int)
+    _sweep_requested = Signal(int, int, int, int)  # start, stop, points per segment, segments
     _close_requested = Signal()
 
     def __init__(
@@ -128,6 +132,7 @@ class DevicePanel(QGroupBox):
         self._close_requested.connect(self.worker.close_port)
         self.worker.connected.connect(self._on_connected)
         self.worker.swept.connect(self._on_swept)
+        self.worker.progress.connect(self._on_progress)
         self.worker.failed.connect(self._on_failed)
         self.worker.disconnected.connect(self._on_disconnected)
         self._thread.start()
@@ -152,6 +157,12 @@ class DevicePanel(QGroupBox):
         self.points_spin = QSpinBox()
         self.points_spin.setRange(2, 101)
         self.points_spin.setValue(101)
+        # Several scans stitched into one sweep, for more points than the device gives at once.
+        self.segments_spin = QSpinBox()
+        self.segments_spin.setRange(1, MAX_SEGMENTS)
+        self.total_label = QLabel()
+        self.points_spin.valueChanged.connect(self._update_total)
+        self.segments_spin.valueChanged.connect(self._update_total)
         self.sweep_button = QPushButton("Single Sweep")
         self.sweep_button.clicked.connect(self.single_sweep)
         self.continuous_button = QPushButton("Continuous")
@@ -170,9 +181,11 @@ class DevicePanel(QGroupBox):
             ("Start:", self.start_spin),
             ("Stop:", self.stop_spin),
             ("Points:", self.points_spin),
+            ("Segments:", self.segments_spin),
         ):
             bottom.addWidget(QLabel(label))
             bottom.addWidget(widget)
+        bottom.addWidget(self.total_label)
         bottom.addWidget(self.sweep_button)
         bottom.addWidget(self.continuous_button)
         bottom.addStretch()
@@ -252,6 +265,12 @@ class DevicePanel(QGroupBox):
             self.points_spin.value(),
         )
 
+    def _update_total(self) -> None:
+        """Show the sweep's total point count when it is split into segments."""
+        segments = self.segments_spin.value()
+        total = self.points_spin.value() * segments
+        self.total_label.setText(f"= {total} points" if segments > 1 else "")
+
     def single_sweep(self) -> None:
         if self.device is not None and not self.busy:
             self._start_sweep(continuous=False)
@@ -260,7 +279,11 @@ class DevicePanel(QGroupBox):
         self.busy = True
         self._sweep_is_continuous = continuous
         self._update_controls()
-        self._sweep_requested.emit(*self.sweep_settings())
+        self._sweep_requested.emit(*self.sweep_settings(), self.segments_spin.value())
+
+    @Slot(int, int)
+    def _on_progress(self, done: int, total: int) -> None:
+        self.status.emit(f"Sweeping: {done} of {total} segments done")
 
     def _on_continuous_toggled(self, on: bool) -> None:
         if on and self.device is not None and not self.busy:
@@ -295,7 +318,7 @@ class DevicePanel(QGroupBox):
         self.connect_button.setEnabled(
             connected or (not self.busy and self.port_combo.count() > 0)
         )
-        for widget in (self.start_spin, self.stop_spin, self.points_spin):
+        for widget in (self.start_spin, self.stop_spin, self.points_spin, self.segments_spin):
             widget.setEnabled(connected and not self.continuous_button.isChecked())
         self.sweep_button.setEnabled(
             connected and not self.busy and not self.continuous_button.isChecked()

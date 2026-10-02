@@ -90,6 +90,54 @@ def test_single_sweep(qtbot, connected):
     qtbot.waitUntil(lambda: connected.sweep_button.isEnabled())
 
 
+def test_segments_default_to_one_plain_sweep(qtbot, panel):
+    assert panel.segments_spin.value() == 1
+    assert not panel.segments_spin.isEnabled()  # until connected
+    assert panel.total_label.text() == ""
+    panel.segments_spin.setValue(5)
+    assert panel.total_label.text() == "= 505 points"
+    panel.points_spin.setValue(51)
+    assert panel.total_label.text() == "= 255 points"
+    panel.segments_spin.setValue(1)
+    assert panel.total_label.text() == ""
+
+
+def test_segmented_sweep(qtbot, connected):
+    messages = []
+    connected.status.connect(messages.append)
+    connected.start_spin.setValue(100)
+    connected.stop_spin.setValue(500)
+    connected.segments_spin.setValue(3)
+    with qtbot.waitSignal(connected.measurement_ready, timeout=5000) as blocker:
+        connected.sweep_button.click()
+    measurement = blocker.args[0]
+    assert measurement.points == 303
+    assert measurement.start_hz == 100e6
+    assert measurement.stop_hz == 500e6
+    qtbot.waitUntil(lambda: connected.sweep_button.isEnabled())
+    progress = [m for m in messages if m.startswith("Sweeping")]
+    assert progress == [f"Sweeping: {n} of 3 segments done" for n in (1, 2, 3)]
+    assert messages[-1].startswith("Sweep complete: 303 points in ")
+
+
+def test_plain_sweep_reports_no_segment_progress(qtbot, connected):
+    messages = []
+    connected.status.connect(messages.append)
+    with qtbot.waitSignal(connected.measurement_ready, timeout=5000):
+        connected.sweep_button.click()
+    qtbot.waitUntil(lambda: connected.sweep_button.isEnabled())
+    assert not any(m.startswith("Sweeping") for m in messages)
+
+
+def test_segments_are_locked_during_continuous_sweeps(qtbot, connected):
+    assert connected.segments_spin.isEnabled()
+    connected.continuous_button.click()
+    assert not connected.segments_spin.isEnabled()
+    connected.continuous_button.click()
+    qtbot.waitUntil(lambda: not connected.busy, timeout=5000)
+    assert connected.segments_spin.isEnabled()
+
+
 def test_sweep_settings_round_to_hz(connected):
     connected.start_spin.setValue(0.05)
     connected.stop_spin.setValue(433.92)

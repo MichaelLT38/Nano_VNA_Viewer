@@ -11,6 +11,7 @@ from nano_vna_viewer.rf import (
     phase_deg,
     s_db,
     vswr,
+    vswr_band,
 )
 from nano_vna_viewer.touchstone import load_touchstone
 
@@ -63,6 +64,50 @@ def test_impedance_of_ideal_open_is_infinite():
 def test_min_vswr_index():
     assert min_vswr_index(np.array([0.9, 0.5j, -0.2, 0.7])) == 2
     assert min_vswr_index(load_touchstone(SAMPLE).s11) == 38
+
+
+def _dip(frequency, centre=150.4e6):
+    """|S11| rising in a straight line either side of a perfect match at ``centre``."""
+    return np.abs(frequency - centre) / 60e6 + 0j
+
+
+def test_vswr_band_edges_are_interpolated_between_points():
+    frequency = np.linspace(100e6, 200e6, 101)  # 1 MHz steps; the edges fall between points
+    # VSWR 2 is |S11| = 1/3, reached 20 MHz either side of the match.
+    low, high = vswr_band(frequency, _dip(frequency))
+    assert low == pytest.approx(130.4e6)
+    assert high == pytest.approx(170.4e6)
+
+
+def test_vswr_band_with_another_limit():
+    frequency = np.linspace(100e6, 200e6, 101)
+    # VSWR 1.5 is |S11| = 0.2, reached 12 MHz either side.
+    low, high = vswr_band(frequency, _dip(frequency), limit=1.5)
+    assert low == pytest.approx(138.4e6)
+    assert high == pytest.approx(162.4e6)
+
+
+def test_vswr_band_is_none_when_the_best_match_is_above_the_limit():
+    frequency = np.linspace(100e6, 200e6, 101)
+    assert vswr_band(frequency, np.full(101, 0.5 + 0j)) is None
+    assert vswr_band(load_touchstone(SAMPLE).frequency_hz, load_touchstone(SAMPLE).s11) is None
+
+
+def test_vswr_band_edge_outside_the_sweep_is_none():
+    frequency = np.linspace(140e6, 200e6, 61)  # the low edge (130.4 MHz) is below the sweep
+    low, high = vswr_band(frequency, _dip(frequency))
+    assert low is None
+    assert high == pytest.approx(170.4e6)
+    assert vswr_band(frequency, np.full(61, 0.1 + 0j)) == (None, None)
+
+
+def test_vswr_band_stops_at_the_first_crossing():
+    # A second matched region further out is not part of the band around the best match.
+    frequency = np.linspace(100e6, 200e6, 11)
+    s11 = np.array([0.1, 0.1, 0.9, 0.9, 0.3, 0.05, 0.3, 0.9, 0.9, 0.9, 0.9], dtype=complex)
+    low, high = vswr_band(frequency, s11)
+    assert 130e6 < low < 140e6
+    assert 160e6 < high < 170e6
 
 
 def test_interpolate_s_keeps_every_measured_point():

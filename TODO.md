@@ -49,6 +49,11 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
   - Dashed "Min VSWR" line / Smith ring; marker starts there; View → Go to Minimum VSWR (Ctrl+M)
   - Minimum |S11| point; not necessarily where X = 0 (e.g. 50.S1P: 51.27 − j14.67 Ω)
 - [x] Show impedance (R + jX) at the marker
+  - Plus the equivalent series inductor or capacitor, e.g. "(series 39.7 pF)"
+- [x] Show the VSWR ≤ 2 band around the best match (shaded on Return Loss and VSWR; edges and
+  width in the info rows; edges interpolated between measured points)
+- [x] Reference trace: hold the current trace or load a file as a grey comparison trace
+  (View menu, Ctrl+R to hold); display only, never exported
 - [x] Export plots as PNG (current tab; File menu, Ctrl+E)
 - [x] Export data as CSV (S-params, dB, phase, VSWR, Z; File menu, Ctrl+Shift+E)
 
@@ -60,6 +65,9 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
   - Firmware hang fixed: restoring + resuming after every scan hung a NanoVNA-H (fw 1.2.43) after 162 varied
     sweeps; the scan-only pattern ran 500+ without a hang. Writes time out instead of blocking on a hung device.
 - [x] Single sweep and continuous sweep modes (serial I/O on a background thread)
+- [x] Segmented sweeps: up to 20 scans stitched into one sweep, for more than 101 points
+  - Same scan-only pattern as a plain sweep. Hardware test passed on the real NanoVNA-H
+    (`NANOVNA_PORT=COM12 pytest tests/test_nanovna.py`)
 - [x] Save the captured sweep as `.S1P` (and `.S2P` if S21 is captured)
 - [x] Document the Linux serial permission fix (add the user to the `dialout` group)
 - [x] Verified against a real NanoVNA-H, firmware 1.2.43 (`NANOVNA_PORT=COM12 pytest`)
@@ -81,4 +89,6 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
 - [x] Publish a GitHub release with both builds
   - v0.1.0: https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.1.0
   - v0.1.1 (curve smoothing): https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.1.1
+  - v0.2.0 (segmented sweeps, reference trace, matched band and series component readout):
+    https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.2.0
   - `.github/workflows/build.yml` tests + builds on every push and publishes a release on a `v*` tag

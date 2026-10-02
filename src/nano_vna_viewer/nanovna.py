@@ -11,13 +11,15 @@ resuming it after every scan, then sending the next command ~0.2 s later, hung t
 device within a few minutes when the point count changed between sweeps (it locked
 up on the first command after "resume"). So the device is paused once, only "scan"
 is sent per sweep, and its own sweep is restored and resumed just once, on close.
-That pattern ran 500 varied sweeps without a hang.
+That pattern ran 500 varied sweeps without a hang. A segmented sweep follows it too:
+it is just several scans in a row.
 """
 
 from __future__ import annotations
 
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -222,11 +224,56 @@ class NanoVNA:
         Pauses the device's own sweep on first use; see the module notes on why it
         isn't restored after every scan.
         """
+        self._check_range(start_hz, stop_hz, points)
+        return self._measurement(self._scan_data(start_hz, stop_hz, points))
+
+    def scan_segments(
+        self,
+        start_hz: int,
+        stop_hz: int,
+        points: int,
+        segments: int,
+        on_segment: Callable[[int, int], None] | None = None,
+    ) -> Measurement:
+        """Measure the range in several back-to-back scans of ``points`` each.
+
+        This gives more measured points than one scan allows. One even grid of
+        ``points * segments`` frequencies is laid over the range and each scan covers
+        the next ``points`` of it, so the segments don't overlap. ``on_segment(done,
+        total)`` is called after each scan.
+        """
+        if segments == 1:
+            return self.scan(start_hz, stop_hz, points)
+        self._check_range(start_hz, stop_hz, points)
+        if segments < 1:
+            raise NanoVNAError("Segments must be at least 1.")
+        total = points * segments
+        if stop_hz - start_hz < total - 1:
+            raise NanoVNAError(
+                f"The frequency range is too narrow for {total} points (it needs 1 Hz per point)."
+            )
+
+        step = (stop_hz - start_hz) / (total - 1)
+        parts = []
+        for segment in range(segments):
+            first = round(start_hz + segment * points * step)
+            last = round(start_hz + ((segment + 1) * points - 1) * step)
+            parts.append(self._scan_data(first, last, points))
+            if on_segment is not None:
+                on_segment(segment + 1, segments)
+        data = np.concatenate(parts)
+        if not np.all(np.diff(data[:, 0]) > 0):
+            raise NanoVNAError("The NanoVNA returned segments whose frequencies overlap.")
+        return self._measurement(data)
+
+    def _check_range(self, start_hz: int, stop_hz: int, points: int) -> None:
         if not 0 < start_hz < stop_hz:
             raise NanoVNAError("Start frequency must be above zero and below stop frequency.")
         if not 2 <= points <= self.max_points:
             raise NanoVNAError(f"Points must be between 2 and {self.max_points}.")
 
+    def _scan_data(self, start_hz: int, stop_hz: int, points: int) -> np.ndarray:
+        """One scan, as rows of frequency, S11 real, S11 imaginary, S21 real, S21 imaginary."""
         if not self._paused:
             self.command("pause")
             self._paused = True
@@ -242,6 +289,9 @@ class NanoVNA:
             raise NanoVNAError(
                 f"Expected {points} points of scan data, got {len(lines)} lines."
             )
+        return data
+
+    def _measurement(self, data: np.ndarray) -> Measurement:
         source = f"NanoVNA ({self.port}) {datetime.now():%H:%M:%S}"
         return measurement_from_sweep(
             frequency_hz=data[:, 0],

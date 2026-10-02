@@ -5,6 +5,9 @@ marker to the nearest measured point, and every plot plus the readout follows.
 
 Curve smoothing is optional and display-only: the line is drawn through interpolated
 values, while the marker and readout stay on the measured points.
+
+A second measurement can be held as a "memory" trace, drawn in grey behind the live one
+for comparison. (In this module "reference" means the minimum-VSWR mark, not that trace.)
 """
 
 from __future__ import annotations
@@ -25,9 +28,9 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .rf import impedance, interpolate_s, min_vswr_index, phase_deg, s_db, vswr
+from .rf import impedance, interpolate_s, min_vswr_index, phase_deg, s_db, vswr, vswr_band
 from .touchstone import Measurement
-from .units import format_frequency, format_impedance
+from .units import format_frequency, format_impedance, format_series_component
 
 # Normalized values drawn on the Smith chart grid: resistance and reactance for the
 # impedance grid, conductance and susceptance for the admittance grid.
@@ -43,15 +46,21 @@ class Theme:
     marker: str
     grid: tuple[int, int, int, int]
     admittance_grid: tuple[int, int, int, int]
-    reference: str  # minimum-VSWR marker
+    reference: str  # minimum-VSWR marker and the matched band
+    memory: str  # held comparison trace
 
 
 LIGHT = Theme(
-    "#ffffff", "#202020", "#1f6fb4", "#d9730d", "#c2185b", (0, 0, 0, 60), (0, 140, 110, 90), "#2e7d32"
+    "#ffffff", "#202020", "#1f6fb4", "#d9730d", "#c2185b", (0, 0, 0, 60), (0, 140, 110, 90), "#2e7d32",
+    "#8f8f8f",
 )
 DARK = Theme(
-    "#1e1e1e", "#d0d0d0", "#4ea1ff", "#ffa64d", "#ff4fa3", (255, 255, 255, 60), (90, 210, 170, 80), "#66bb6a"
+    "#1e1e1e", "#d0d0d0", "#4ea1ff", "#ffa64d", "#ff4fa3", (255, 255, 255, 60), (90, 210, 170, 80), "#66bb6a",
+    "#858585",
 )
+
+# Opacity (0-255) of the shading over the matched band.
+BAND_ALPHA = 40
 
 
 def current_theme() -> Theme:
@@ -93,6 +102,7 @@ class FrequencyPlot(pg.PlotWidget):
         self.frequency = np.empty(0)
         self.curve: pg.PlotDataItem | None = None
         self.points: pg.PlotDataItem | None = None  # measured points, shown under a smoothed curve
+        self.memory: pg.PlotDataItem | None = None  # held comparison trace
 
         self.setTitle(title)
         self.setLabel("bottom", "Frequency", units="Hz")
@@ -122,6 +132,16 @@ class FrequencyPlot(pg.PlotWidget):
         # (as they do when a file opens).
         self.reference_line.setZValue(10)
         self.marker_line.setZValue(11)
+
+        # Shading over the band where the match is good, behind everything else.
+        band_color = pg.mkColor(theme.reference)
+        band_color.setAlpha(BAND_ALPHA)
+        self.band_region = pg.LinearRegionItem(
+            movable=False, brush=pg.mkBrush(band_color), pen=pg.mkPen(None)
+        )
+        self.band_region.setZValue(-10)
+        self.band_region.setVisible(False)
+        self.addItem(self.band_region, ignoreBounds=True)
 
     def set_trace(
         self,
@@ -166,6 +186,7 @@ class FrequencyPlot(pg.PlotWidget):
         self.points = None
         self.marker_line.setVisible(False)
         self.reference_line.setVisible(False)
+        self.band_region.setVisible(False)
         self.frequency = np.empty(0)
 
     def set_marker(self, index: int) -> None:
@@ -177,6 +198,27 @@ class FrequencyPlot(pg.PlotWidget):
         if self.frequency.size:
             self.reference_line.setValue(self.frequency[index])
             self.reference_line.setVisible(True)
+
+    def set_band(self, low_hz: float, high_hz: float) -> None:
+        """Shade a frequency band (where the match is good)."""
+        self.band_region.setRegion((low_hz, high_hz))
+        self.band_region.setVisible(True)
+
+    def set_memory(self, frequency: np.ndarray | None = None, y: np.ndarray | None = None) -> None:
+        """Draw a held comparison trace behind the live one; with no arguments, remove it.
+
+        It is separate from the live trace, so it stays when that is replaced.
+        """
+        if self.memory is not None:
+            self.removeItem(self.memory)
+            self.memory = None
+        if frequency is not None:
+            self.memory = pg.PlotDataItem(
+                frequency, y, pen=pg.mkPen(self.theme.memory, width=1.5), connect="finite"
+            )
+            self.memory.setZValue(-1)
+            # Left out of the auto-range, so the view keeps following the live trace.
+            self.addItem(self.memory, ignoreBounds=True)
 
     def reset_view(self) -> None:
         self.enableAutoRange()
@@ -236,6 +278,7 @@ class SmithChart(pg.PlotWidget):
         self.gamma = np.empty(0, dtype=complex)
         self.curve: pg.PlotDataItem | None = None
         self.points: pg.PlotDataItem | None = None  # measured points, shown under a smoothed curve
+        self.memory: pg.PlotDataItem | None = None  # held comparison trace
 
         self.setTitle("Smith Chart (S11)")
         self.setAspectLocked(True)
@@ -322,6 +365,18 @@ class SmithChart(pg.PlotWidget):
         self.reference_dot.clear()
         self.gamma = np.empty(0, dtype=complex)
 
+    def set_memory(self, s11: np.ndarray | None = None) -> None:
+        """Draw a held comparison trace behind the live one; with no argument, remove it."""
+        if self.memory is not None:
+            self.removeItem(self.memory)
+            self.memory = None
+        if s11 is not None:
+            self.memory = pg.PlotDataItem(
+                s11.real, s11.imag, pen=pg.mkPen(self.theme.memory, width=1.5)
+            )
+            self.memory.setZValue(-1)
+            self.addItem(self.memory, ignoreBounds=True)
+
     def set_marker(self, index: int) -> None:
         point = self.gamma[index]
         self.marker_dot.setData([point.real], [point.imag])
@@ -372,6 +427,9 @@ class PlotPanel(QWidget):
         self.measurement: Measurement | None = None
         self.marker_index: int | None = None
         self.min_vswr_index: int | None = None
+        # (low, high) edges in Hz of the matched band; an edge outside the sweep is None.
+        self.vswr_band: tuple[float | None, float | None] | None = None
+        self.memory: Measurement | None = None  # held comparison measurement
         self.smoothing = False
 
         self.magnitude_plot = FrequencyPlot("Return Loss (S11)", "Magnitude", "dB", self.theme)
@@ -457,9 +515,25 @@ class PlotPanel(QWidget):
         self.tabs.setTabVisible(TRANSMISSION_TAB, m.s21 is not None)
 
         self.min_vswr_index = min_vswr_index(m.s11)
+        self.vswr_band = vswr_band(m.frequency_hz, m.s11)
+        self._mark_best_match()
+        self.set_marker(self.marker_index if keep_marker else self.min_vswr_index)
+
+    def _mark_best_match(self) -> None:
+        """Mark the minimum VSWR on every plot, and shade the matched band if there is one.
+
+        Redrawing a trace hides these, so they are applied again after each redraw.
+        """
         for plot in self.plots:
             plot.set_reference(self.min_vswr_index)
-        self.set_marker(self.marker_index if keep_marker else self.min_vswr_index)
+        if self.vswr_band is not None:
+            m = self.measurement
+            low, high = self.vswr_band
+            # An edge outside the sweep is drawn at the end of the sweep.
+            low = m.start_hz if low is None else low
+            high = m.stop_hz if high is None else high
+            for plot in (self.magnitude_plot, self.vswr_plot):
+                plot.set_band(low, high)
 
     def _draw_traces(self, reset: bool) -> None:
         """Draw every trace of the loaded measurement, smoothed if that is switched on."""
@@ -492,12 +566,50 @@ class PlotPanel(QWidget):
         Zoom and marker are kept.
         """
         self.smoothing = enabled
+        self._draw_memory()
         if self.measurement is None:
             return
         self._draw_traces(reset=False)
-        for plot in self.plots:
-            plot.set_reference(self.min_vswr_index)
+        self._mark_best_match()
         self.set_marker(self.marker_index)
+
+    def set_memory(self, m: Measurement | None) -> None:
+        """Hold a measurement on screen as a comparison trace behind the live one.
+
+        It stays while new measurements are shown. None removes it.
+        """
+        self.memory = m
+        self._draw_memory()
+
+    def _draw_memory(self) -> None:
+        m = self.memory
+        s11_plots = (
+            (self.magnitude_plot, s_db),
+            (self.vswr_plot, finite_vswr),
+            (self.phase_plot, phase_deg),
+        )
+        s21_plots = ((self.s21_magnitude_plot, s_db), (self.s21_phase_plot, phase_deg))
+        if m is None:
+            for plot, _ in s11_plots + s21_plots:
+                plot.set_memory()
+            self.smith_chart.set_memory()
+            return
+
+        def line(s):
+            """The (frequency, S) to draw: interpolated when smoothing is on."""
+            dense = interpolate_s(m.frequency_hz, s) if self.smoothing else None
+            return (m.frequency_hz, s) if dense is None else dense
+
+        f, s11 = line(m.s11)
+        for plot, quantity in s11_plots:
+            plot.set_memory(f, quantity(s11))
+        self.smith_chart.set_memory(s11)
+        for plot, quantity in s21_plots:
+            if m.s21 is None:
+                plot.set_memory()
+            else:
+                f, s21 = line(m.s21)
+                plot.set_memory(f, quantity(s21))
 
     def go_to_min_vswr(self) -> None:
         if self.min_vswr_index is not None:
@@ -517,11 +629,14 @@ class PlotPanel(QWidget):
         if m is None or i is None:
             return "No data loaded."
         s11 = m.s11[i : i + 1]
+        z = impedance(s11, m.z0)[0]
+        # The inductor or capacitor that, in series with the resistance, gives this impedance.
+        component = format_series_component(z.imag, m.frequency_hz[i])
         parts = [
             f"Marker: {format_frequency(m.frequency_hz[i])}",
             f"S11: {s_db(s11)[0]:.2f} dB, {phase_deg(s11)[0]:.1f}°",
             f"VSWR: {format_vswr(vswr(s11)[0])}",
-            f"Z: {format_impedance(impedance(s11, m.z0)[0], decimals=2)}",
+            f"Z: {format_impedance(z, decimals=2)}" + (f" (series {component})" if component else ""),
         ]
         if m.s21 is not None:
             s21 = m.s21[i : i + 1]

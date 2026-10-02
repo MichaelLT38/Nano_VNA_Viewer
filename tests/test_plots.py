@@ -16,7 +16,7 @@ from nano_vna_viewer.plots import (
     smith_outline,
 )
 from nano_vna_viewer.rf import SMOOTHING_FACTOR
-from nano_vna_viewer.touchstone import load_touchstone
+from nano_vna_viewer.touchstone import load_touchstone, measurement_from_sweep
 
 SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "data.s1p"
 
@@ -24,6 +24,12 @@ SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "data.s1p"
 @pytest.fixture
 def sample():
     return load_touchstone(SAMPLE)
+
+
+@pytest.fixture
+def matched():
+    # A resonance near 274 MHz with a best VSWR of 1.336, so there is a VSWR ≤ 2 band.
+    return load_touchstone(SAMPLE.parent / "50.S1P")
 
 
 @pytest.fixture
@@ -157,7 +163,8 @@ def test_marker_starts_at_minimum_vswr(panel, sample):
     assert panel.min_vswr_index == 38  # deepest dip, 342.031 MHz
     assert panel.marker_index == 38
     assert panel.readout.text() == (
-        "Marker: 342.031 MHz    S11: -2.99 dB, -82.7°    VSWR: 5.869    Z: 18.81 − j53.18 Ω"
+        "Marker: 342.031 MHz    S11: -2.99 dB, -82.7°    VSWR: 5.869"
+        "    Z: 18.81 − j53.18 Ω (series 8.75 pF)"
     )
 
 
@@ -178,9 +185,11 @@ def test_set_marker_moves_every_plot(panel, sample):
         assert plot.marker_line.value() == pytest.approx(f)
     x, y = panel.smith_chart.marker_dot.getData()
     assert complex(x[0], y[0]) == pytest.approx(sample.s11[60])
-    # Z = 50 (1 + Γ) / (1 - Γ) with Γ = -0.419291008 - 0.73215136j, checked by hand
+    # Z = 50 (1 + Γ) / (1 - Γ) with Γ = -0.419291008 - 0.73215136j, checked by hand;
+    # C = 1 / (2π · 540.02 MHz · 28.71 Ω) = 10.3 pF
     assert panel.readout.text() == (
-        "Marker: 540.02 MHz    S11: -1.48 dB, -119.8°    VSWR: 11.797    Z: 5.65 − j28.71 Ω"
+        "Marker: 540.02 MHz    S11: -1.48 dB, -119.8°    VSWR: 11.797"
+        "    Z: 5.65 − j28.71 Ω (series 10.3 pF)"
     )
 
 
@@ -512,6 +521,126 @@ def test_data_that_cannot_be_splined_is_drawn_plain(panel, tmp_path):
     assert len(panel.magnitude_plot.curve.getData()[0]) == 2
     assert panel.magnitude_plot.points is None
     assert panel.smith_chart.points is None
+
+
+def test_matched_band_is_shaded_on_return_loss_and_vswr(panel, matched):
+    panel.set_measurement(matched)
+    low, high = panel.vswr_band
+    assert low == pytest.approx(271.514e6, rel=1e-5)
+    assert high == pytest.approx(276.071e6, rel=1e-5)
+    for plot in (panel.magnitude_plot, panel.vswr_plot):
+        assert plot.band_region.isVisible()
+        assert plot.band_region.getRegion() == pytest.approx((low, high))
+        assert not plot.band_region.movable
+    assert not panel.phase_plot.band_region.isVisible()
+
+
+def test_no_band_is_shaded_without_a_good_match(panel, sample, matched):
+    panel.set_measurement(sample)  # best VSWR 5.869
+    assert panel.vswr_band is None
+    assert not panel.vswr_plot.band_region.isVisible()
+    panel.set_measurement(matched)
+    assert panel.vswr_plot.band_region.isVisible()
+    panel.set_measurement(sample)
+    assert not panel.vswr_plot.band_region.isVisible()
+
+
+def test_band_edge_outside_the_sweep_is_drawn_at_the_sweep_end(panel):
+    frequency = np.linspace(140e6, 150e6, 11)
+    panel.set_measurement(measurement_from_sweep(frequency, np.full(11, 0.1 + 0j)))
+    assert panel.vswr_band == (None, None)
+    assert panel.vswr_plot.band_region.getRegion() == pytest.approx((140e6, 150e6))
+
+
+def test_band_survives_smoothing_and_does_not_block_clicks(qtbot, panel, matched):
+    panel.set_measurement(matched)
+    region = panel.magnitude_plot.band_region.getRegion()
+    panel.set_smoothing(True)
+    assert panel.magnitude_plot.band_region.isVisible()
+    assert panel.magnitude_plot.band_region.getRegion() == pytest.approx(region)
+    panel.set_marker(10)
+    _click_at(qtbot, panel.magnitude_plot, 274.5e6, -5.0)  # inside the shaded band
+    assert panel.marker_index == 44
+
+
+def _memory_data(plot):
+    x, y = plot.memory.getData()
+    return np.asarray(x), np.asarray(y)
+
+
+def test_memory_trace_on_every_s11_plot(panel, sample):
+    panel.set_memory(sample)
+    assert panel.memory is sample
+    x, y = _memory_data(panel.magnitude_plot)
+    np.testing.assert_array_equal(x, sample.frequency_hz)
+    np.testing.assert_allclose(y, 20 * np.log10(abs(sample.s11)))
+    np.testing.assert_allclose(_memory_data(panel.phase_plot)[1], np.angle(sample.s11, deg=True))
+    assert len(_memory_data(panel.vswr_plot)[0]) == 101
+    x, y = _memory_data(panel.smith_chart)
+    np.testing.assert_allclose(x + 1j * y, sample.s11)
+    for plot in (panel.s21_magnitude_plot, panel.s21_phase_plot):
+        assert plot.memory is None  # the held measurement has no S21
+
+
+def test_memory_trace_stays_when_a_new_measurement_is_shown(panel, sample, two_port):
+    panel.set_memory(sample)
+    held = panel.magnitude_plot.memory
+    panel.set_measurement(two_port)
+    assert panel.magnitude_plot.memory is held
+    assert held in panel.magnitude_plot.getPlotItem().items
+    np.testing.assert_allclose(panel.magnitude_plot.curve.yData, 20 * np.log10(abs(two_port.s11)))
+    # The marker and its readout belong to the live measurement.
+    assert panel.measurement is two_port
+    assert "Marker: 1 MHz" in panel.readout.text()
+
+
+def test_memory_trace_is_left_out_of_the_auto_range(panel, sample, two_port):
+    panel.set_memory(sample)  # 50 kHz to 900 MHz
+    panel.set_measurement(two_port)  # 1 to 3 MHz
+    (x0, x1), _ = panel.magnitude_plot.getPlotItem().getViewBox().viewRange()
+    assert 0 < x0 and x1 < 4e6
+
+
+def test_memory_trace_draws_behind_the_live_trace(panel, sample, two_port):
+    panel.set_memory(sample)
+    panel.set_measurement(two_port)
+    for plot in (panel.magnitude_plot, panel.smith_chart):
+        assert plot.memory.zValue() < plot.curve.zValue()
+    assert panel.magnitude_plot.memory.opts["pen"].color().name() == panel.theme.memory
+
+
+def test_memory_trace_with_s21(panel, sample, two_port):
+    panel.set_memory(two_port)
+    np.testing.assert_allclose(
+        _memory_data(panel.s21_magnitude_plot)[1], 20 * np.log10(abs(two_port.s21))
+    )
+    np.testing.assert_allclose(
+        _memory_data(panel.s21_phase_plot)[1], np.angle(two_port.s21, deg=True)
+    )
+    panel.set_memory(sample)
+    assert panel.s21_magnitude_plot.memory is None
+
+
+def test_memory_trace_follows_smoothing(panel, sample):
+    panel.set_memory(sample)
+    panel.set_smoothing(True)  # no live measurement: only the memory trace is redrawn
+    for plot in (panel.magnitude_plot, panel.smith_chart):
+        assert len(_memory_data(plot)[0]) == SMOOTH_POINTS
+    panel.set_measurement(sample)
+    assert len(panel.magnitude_plot.getPlotItem().listDataItems()) == 3  # curve, dots, memory
+    panel.set_smoothing(False)
+    assert len(_memory_data(panel.magnitude_plot)[0]) == 101
+
+
+def test_clearing_the_memory_trace(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_memory(sample)
+    panel.set_memory(None)
+    assert panel.memory is None
+    for plot in panel.plots:
+        assert plot.memory is None
+    assert len(panel.magnitude_plot.getPlotItem().listDataItems()) == 1
+    np.testing.assert_allclose(panel.magnitude_plot.curve.yData, 20 * np.log10(abs(sample.s11)))
 
 
 def test_marker_draws_over_reference(panel):

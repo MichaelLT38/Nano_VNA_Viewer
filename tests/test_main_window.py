@@ -8,9 +8,18 @@ from PySide6.QtGui import QImage
 from fake_nanovna import FakePorts
 from nano_vna_viewer.device_panel import DevicePanel
 from nano_vna_viewer.touchstone import load_touchstone
-from nano_vna_viewer.main_window import APP_NAME, LAST_DIR_KEY, NO_VALUE, SMOOTH_KEY, MainWindow
+from nano_vna_viewer.main_window import (
+    APP_NAME,
+    LAST_DIR_KEY,
+    NO_VALUE,
+    SMOOTH_KEY,
+    MainWindow,
+    band_text,
+)
 
 SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "data.s1p"
+# A resonance near 274 MHz with a best VSWR of 1.336, so there is a VSWR ≤ 2 band.
+MATCHED = SAMPLE.parent / "50.S1P"
 
 
 @pytest.fixture
@@ -191,6 +200,99 @@ def test_exports_are_unaffected_by_smoothing(window, tmp_path):
     assert load_touchstone(tmp_path / "copy.s1p").points == 101
 
 
+def test_matched_band_row(window):
+    assert window.band_label.text() == NO_VALUE
+    window.open_file(SAMPLE)  # best VSWR 5.869
+    assert window.band_label.text() == "none"
+    window.open_file(MATCHED)
+    assert window.band_label.text() == "271.514 MHz to 276.071 MHz  (4.55706 MHz wide)"
+
+
+def test_band_text_for_edges_outside_the_sweep():
+    m = load_touchstone(MATCHED)  # 135 to 450 MHz
+    assert band_text(m, (None, 276e6)) == "below 135 MHz to 276 MHz"
+    assert band_text(m, (271.5e6, None)) == "271.5 MHz to above 450 MHz"
+    assert band_text(m, (None, None)) == "below 135 MHz to above 450 MHz"
+
+
+def test_reference_actions_start_disabled(window):
+    assert window.hold_reference_action.shortcut().toString() == "Ctrl+R"
+    assert not window.hold_reference_action.isEnabled()  # nothing to hold yet
+    assert not window.clear_reference_action.isEnabled()
+    assert window.load_reference_action.isEnabled()
+    assert window.reference_label.text() == NO_VALUE
+    window.hold_reference()  # ignored without data
+    assert window.plots.memory is None
+
+
+def test_hold_and_clear_reference(window):
+    window.open_file(SAMPLE)
+    assert window.hold_reference_action.isEnabled()
+    window.hold_reference_action.trigger()
+    held = window.measurement
+    assert window.plots.memory is held
+    assert window.reference_label.text() == (
+        "data.s1p: minimum VSWR 5.869 at 342.031 MHz  (S11 -2.99 dB)"
+    )
+    assert window.clear_reference_action.isEnabled()
+
+    window.open_file(MATCHED)  # the reference stays while other data is shown
+    assert window.plots.memory is held
+    assert window.plots.measurement is window.measurement
+    assert window.min_vswr_label.text() == "1.336 at 273.6 MHz  (S11 -16.84 dB)"
+    assert window.reference_label.text().startswith("data.s1p: ")
+
+    window.clear_reference_action.trigger()
+    assert window.plots.memory is None
+    assert window.reference_label.text() == NO_VALUE
+    assert not window.clear_reference_action.isEnabled()
+
+
+def test_load_reference_file_leaves_displayed_data_alone(window, monkeypatch):
+    window.open_file(SAMPLE)
+    shown = window.measurement
+    monkeypatch.setattr(
+        "nano_vna_viewer.main_window.QFileDialog.getOpenFileName",
+        lambda *args: (str(MATCHED), ""),
+    )
+    window.load_reference_action.trigger()
+    assert window.measurement is shown
+    assert window.windowTitle() == f"data.s1p — {APP_NAME}"
+    assert window.plots.memory.name == "50.S1P"
+    assert window.reference_label.text() == (
+        "50.S1P: minimum VSWR 1.336 at 273.6 MHz  (S11 -16.84 dB)"
+    )
+    assert window.statusBar().currentMessage() == "Loaded 50.S1P as the reference"
+
+
+def test_reference_can_be_loaded_before_any_data(window):
+    assert window.load_reference(MATCHED)
+    assert window.measurement is None
+    assert window.file_label.text() == NO_VALUE
+    assert window.plots.memory.name == "50.S1P"
+    assert window.clear_reference_action.isEnabled()
+
+
+def test_bad_reference_file_keeps_the_current_reference(window, tmp_path):
+    window.open_file(SAMPLE)
+    window.hold_reference()
+    bad = tmp_path / "bad.s1p"
+    bad.write_text("not touchstone\n")
+    assert not window.load_reference(bad)
+    assert len(window.errors) == 1 and "bad.s1p" in window.errors[0]
+    assert window.plots.memory is window.measurement
+    assert window.reference_label.text().startswith("data.s1p: ")
+
+
+def test_reference_is_not_exported(window, tmp_path):
+    window.open_file(SAMPLE)
+    window.load_reference(MATCHED)
+    assert window.export_csv(tmp_path / "data.csv")
+    lines = (tmp_path / "data.csv").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 102
+    assert lines[1].startswith("50000.0,")  # data.s1p's first point, not the reference's
+
+
 def test_export_actions_need_a_file(window):
     assert not window.export_png_action.isEnabled()
     assert not window.export_csv_action.isEnabled()
@@ -291,6 +393,16 @@ def test_live_sweep_is_displayed(qtbot, window):
     assert window.plots.tabs.isTabVisible(4)  # Transmission
     assert window.save_touchstone_action.isEnabled()
     qtbot.waitUntil(lambda: window.statusBar().currentMessage().startswith("Sweep complete: 101 points"))
+
+
+def test_segmented_live_sweep_is_displayed_and_saved(qtbot, window, tmp_path):
+    window.device_panel.segments_spin.setValue(3)
+    _live_sweep(qtbot, window)
+    assert window.measurement.points == 303
+    assert window.points_label.text() == "303"
+    assert len(window.plots.magnitude_plot.curve.getData()[0]) == 303
+    assert window.save_touchstone(tmp_path / "wide.s2p")
+    assert load_touchstone(tmp_path / "wide.s2p").points == 303
 
 
 def test_save_live_sweep_as_touchstone(qtbot, window, tmp_path, monkeypatch):
