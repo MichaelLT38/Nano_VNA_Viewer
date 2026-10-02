@@ -8,7 +8,7 @@ from PySide6.QtGui import QImage
 from fake_nanovna import FakePorts
 from nano_vna_viewer.device_panel import DevicePanel
 from nano_vna_viewer.touchstone import load_touchstone
-from nano_vna_viewer.main_window import APP_NAME, LAST_DIR_KEY, NO_VALUE, MainWindow
+from nano_vna_viewer.main_window import APP_NAME, LAST_DIR_KEY, NO_VALUE, SMOOTH_KEY, MainWindow
 
 SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "data.s1p"
 
@@ -145,6 +145,50 @@ def test_minimum_vswr_detail(window):
     assert window.min_vswr_label.text() == NO_VALUE
     window.open_file(SAMPLE)
     assert window.min_vswr_label.text() == "5.869 at 342.031 MHz  (S11 -2.99 dB)"
+
+
+def test_smooth_curves_action(window, settings):
+    action = window.smooth_action
+    assert action.text() == "&Smooth Curves"
+    assert action.isCheckable() and not action.isChecked()
+    assert not window.plots.smoothing
+    window.open_file(SAMPLE)
+    assert len(window.plots.magnitude_plot.curve.getData()[0]) == 101
+
+    action.trigger()
+    assert window.plots.smoothing
+    assert len(window.plots.magnitude_plot.curve.getData()[0]) == 1001
+    assert settings.value(SMOOTH_KEY, type=bool) is True
+    # Display only: the readouts still describe measured points.
+    assert window.min_vswr_label.text() == "5.869 at 342.031 MHz  (S11 -2.99 dB)"
+    assert window.points_label.text() == "101"
+
+    action.trigger()
+    assert not window.plots.smoothing
+    assert settings.value(SMOOTH_KEY, type=bool) is False
+
+
+def test_smoothing_persists_to_new_window(qtbot, settings, ports):
+    first = MainWindow(settings, device_panel=_panel(ports))
+    qtbot.addWidget(first)
+    first.smooth_action.trigger()
+    settings.sync()
+
+    second = MainWindow(settings, device_panel=_panel(ports))
+    qtbot.addWidget(second)
+    assert second.smooth_action.isChecked()
+    assert second.plots.smoothing
+    second.open_file(SAMPLE)
+    assert len(second.plots.magnitude_plot.curve.getData()[0]) == 1001
+
+
+def test_exports_are_unaffected_by_smoothing(window, tmp_path):
+    window.open_file(SAMPLE)
+    window.smooth_action.trigger()
+    assert window.export_csv(tmp_path / "data.csv")
+    assert len((tmp_path / "data.csv").read_text(encoding="utf-8").splitlines()) == 102
+    assert window.save_touchstone(tmp_path / "copy.s1p")
+    assert load_touchstone(tmp_path / "copy.s1p").points == 101
 
 
 def test_export_actions_need_a_file(window):

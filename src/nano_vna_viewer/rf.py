@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.interpolate import CubicSpline
 
 # Floor for |S| before taking a log, so a perfect match gives -240 dB rather than -inf.
 _MIN_MAGNITUDE = 1e-12
+
+# Drawn segments per measured interval when curve smoothing is on.
+SMOOTHING_FACTOR = 10
 
 
 def s_db(s: np.ndarray) -> np.ndarray:
@@ -43,3 +47,26 @@ def impedance(s11: np.ndarray, z0: complex) -> np.ndarray:
 def min_vswr_index(s11: np.ndarray) -> int:
     """Index of the best match (lowest |S11|, hence lowest VSWR)."""
     return int(np.argmin(np.abs(s11)))
+
+
+def interpolate_s(
+    frequency: np.ndarray, s: np.ndarray, factor: int = SMOOTHING_FACTOR
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """A denser (frequency, S) pair for drawing a smooth curve through the measured points.
+
+    The complex value is interpolated with a cubic spline, so dB, VSWR and phase should
+    be derived from the result rather than interpolated themselves. Every measured point
+    is kept: it is element ``i * factor`` of the result.
+
+    Returns None when the data can't be splined (fewer than 3 points, frequency not
+    strictly increasing, or non-finite values); the caller then draws the plain trace.
+    """
+    n = len(frequency)
+    if n < 3 or not np.all(np.diff(frequency) > 0) or not np.all(np.isfinite(s)):
+        return None
+    # Interpolating the frequency over its own index keeps uneven spacing intact.
+    dense_frequency = np.interp(
+        np.linspace(0, n - 1, (n - 1) * factor + 1), np.arange(n), frequency
+    )
+    dense_frequency[::factor] = frequency  # exact, free of rounding
+    return dense_frequency, CubicSpline(frequency, s)(dense_frequency)

@@ -40,6 +40,9 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
 - [x] Cursor/marker readout (frequency, value) on hover or click
   - One marker shared by all plots: click a plot or drag the line; it snaps to the nearest point
 - [x] Zoom, pan, and reset view (mouse wheel / drag; View → Reset Zoom, Ctrl+0)
+- [x] Optional curve smoothing (View → Smooth Curves, off by default, remembered)
+  - Display only: cubic spline of the complex S-parameter, with dB / VSWR / phase derived from it;
+    measured points shown as dots; marker, readouts, and exports stay on measured points
 
 ## Phase 5 — Analysis and export
 - [x] Find and mark the minimum-SWR / resonant frequency
@@ -77,4 +80,5 @@ NumPy, pyserial (NanoVNA USB), PyInstaller (packaging).
 - [x] Write the final README (install, usage, screenshots)
 - [x] Publish a GitHub release with both builds
   - v0.1.0: https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.1.0
+  - v0.1.1 (curve smoothing): https://github.com/MichaelLT38/Nano_VNA_Viewer/releases/tag/v0.1.1
   - `.github/workflows/build.yml` tests + builds on every push and publishes a release on a `v*` tag

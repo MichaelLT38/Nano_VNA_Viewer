@@ -15,6 +15,7 @@ from nano_vna_viewer.plots import (
     smith_grid_lines,
     smith_outline,
 )
+from nano_vna_viewer.rf import SMOOTHING_FACTOR
 from nano_vna_viewer.touchstone import load_touchstone
 
 SAMPLE = Path(__file__).resolve().parent.parent / "samples" / "data.s1p"
@@ -395,6 +396,122 @@ def test_export_widget(panel, two_port):
     page = panel.export_widget()
     assert panel.s21_magnitude_plot in page.findChildren(type(panel.s21_magnitude_plot))
     assert panel.current_tab_name() == "Transmission"
+
+
+SMOOTH_POINTS = (101 - 1) * SMOOTHING_FACTOR + 1
+
+
+def test_smoothing_is_off_by_default(panel, sample):
+    panel.set_measurement(sample)
+    assert not panel.smoothing
+    for plot in (panel.magnitude_plot, panel.vswr_plot, panel.phase_plot, panel.smith_chart):
+        assert len(plot.curve.getData()[0]) == 101
+        assert plot.points is None
+
+
+def test_smoothing_draws_dense_curve_and_measured_dots(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_smoothing(True)
+    for plot in (panel.magnitude_plot, panel.phase_plot):
+        assert len(plot.curve.getData()[0]) == SMOOTH_POINTS
+        np.testing.assert_array_equal(plot.points.xData, sample.frequency_hz)
+    np.testing.assert_allclose(panel.magnitude_plot.points.yData, 20 * np.log10(abs(sample.s11)))
+    np.testing.assert_allclose(panel.phase_plot.points.yData, np.angle(sample.s11, deg=True))
+    # The curve passes through the measured points.
+    np.testing.assert_allclose(
+        panel.magnitude_plot.curve.yData[::SMOOTHING_FACTOR], 20 * np.log10(abs(sample.s11))
+    )
+    # The dots have no connecting line, and the line has no dots.
+    assert panel.magnitude_plot.points.opts["pen"] is None
+    assert panel.magnitude_plot.curve.opts["symbol"] is None
+
+
+def test_smoothed_smith_chart(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_smoothing(True)
+    chart = panel.smith_chart
+    x, y = chart.curve.getData()
+    assert len(x) == SMOOTH_POINTS
+    np.testing.assert_allclose((x + 1j * y)[::SMOOTHING_FACTOR], sample.s11)
+    x, y = chart.points.getData()
+    np.testing.assert_allclose(x + 1j * y, sample.s11)
+    np.testing.assert_array_equal(chart.gamma, sample.s11)  # the marker still uses measured data
+
+
+def test_smoothed_vswr_leaves_out_infinite_points(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_smoothing(True)
+    # |S11| > 1 at the first point: no dot there, and the curve starts with a gap.
+    np.testing.assert_array_equal(panel.vswr_plot.points.xData, sample.frequency_hz[1:])
+    assert np.isnan(panel.vswr_plot.curve.yData[0])
+
+
+def test_smoothing_keeps_marker_readout_and_zoom(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_marker(60)
+    readout = panel.readout.text()
+    view = panel.magnitude_plot.getPlotItem().getViewBox()
+    view.scaleBy((0.25, 0.25))
+    zoomed = view.viewRange()
+    for enabled in (True, False):
+        panel.set_smoothing(enabled)
+        assert panel.marker_index == 60
+        assert panel.min_vswr_index == 38
+        assert panel.readout.text() == readout
+        np.testing.assert_allclose(view.viewRange(), zoomed)
+        for plot in (panel.magnitude_plot, panel.vswr_plot, panel.phase_plot):
+            assert plot.marker_line.isVisible()
+            assert plot.marker_line.value() == pytest.approx(sample.frequency_hz[60])
+            assert plot.reference_line.isVisible()
+            assert plot.reference_line.value() == pytest.approx(sample.frequency_hz[38])
+        x, y = panel.smith_chart.marker_dot.getData()
+        assert complex(x[0], y[0]) == pytest.approx(sample.s11[60])
+        x, y = panel.smith_chart.reference_dot.getData()
+        assert complex(x[0], y[0]) == pytest.approx(sample.s11[38])
+
+
+def test_marker_snaps_to_measured_points_when_smoothed(qtbot, panel, sample):
+    panel.set_measurement(sample)
+    panel.set_smoothing(True)
+    # Between points 42 and 43, nearer to 42: there is a curve point here but no measurement.
+    step = sample.frequency_hz[43] - sample.frequency_hz[42]
+    _click_at(qtbot, panel.magnitude_plot, sample.frequency_hz[42] + 0.3 * step, -1.0)
+    assert panel.marker_index == 42
+    assert panel.magnitude_plot.marker_line.value() == pytest.approx(sample.frequency_hz[42])
+
+
+def test_turning_smoothing_off_restores_plain_traces(panel, sample):
+    panel.set_measurement(sample)
+    panel.set_smoothing(True)
+    panel.set_smoothing(False)
+    for plot in (panel.magnitude_plot, panel.vswr_plot, panel.phase_plot, panel.smith_chart):
+        assert len(plot.curve.getData()[0]) == 101
+        assert plot.points is None
+    assert len(panel.magnitude_plot.getPlotItem().listDataItems()) == 1
+
+
+def test_smoothing_applies_to_later_measurements(panel, sample, two_port):
+    panel.set_smoothing(True)  # nothing loaded yet: remembered for later
+    assert panel.magnitude_plot.curve is None
+    panel.set_measurement(two_port)
+    for plot in (panel.magnitude_plot, panel.s21_magnitude_plot, panel.s21_phase_plot):
+        assert len(plot.curve.getData()[0]) == (3 - 1) * SMOOTHING_FACTOR + 1
+        np.testing.assert_array_equal(plot.points.xData, two_port.frequency_hz)
+    panel.set_measurement(sample)
+    assert len(panel.magnitude_plot.curve.getData()[0]) == SMOOTH_POINTS
+    assert panel.s21_magnitude_plot.curve is None
+    assert panel.s21_magnitude_plot.points is None
+    assert len(panel.magnitude_plot.getPlotItem().listDataItems()) == 2  # curve + dots
+
+
+def test_data_that_cannot_be_splined_is_drawn_plain(panel, tmp_path):
+    path = tmp_path / "two_points.s1p"
+    path.write_text("# Hz S RI R 50\n1000000 0.1 0.0\n2000000 0.2 0.0\n")
+    panel.set_smoothing(True)
+    panel.set_measurement(load_touchstone(path))
+    assert len(panel.magnitude_plot.curve.getData()[0]) == 2
+    assert panel.magnitude_plot.points is None
+    assert panel.smith_chart.points is None
 
 
 def test_marker_draws_over_reference(panel):

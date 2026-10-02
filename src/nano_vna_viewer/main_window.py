@@ -35,6 +35,7 @@ from .units import format_frequency, format_impedance
 
 APP_NAME = "Nano VNA Viewer"
 LAST_DIR_KEY = "last_open_dir"
+SMOOTH_KEY = "smooth_curves"
 # Linux file dialogs match patterns case-sensitively, so list both cases.
 FILE_FILTER = "Touchstone files (*.s1p *.s2p *.S1P *.S2P);;All files (*)"
 PNG_FILTER = "PNG images (*.png *.PNG)"
@@ -55,6 +56,7 @@ class MainWindow(QMainWindow):
         self.resize(1000, 800)
         self._build_menus()
         self._build_central_widget()
+        self.smooth_action.setChecked(self.settings.value(SMOOTH_KEY, False, type=bool))
         self.device_panel.measurement_ready.connect(self.show_live_measurement)
         self.device_panel.error.connect(lambda message: self.show_error(message, title="NanoVNA"))
         self.device_panel.status.connect(self.statusBar().showMessage)
@@ -105,6 +107,14 @@ class MainWindow(QMainWindow):
         self.min_vswr_action.setShortcut("Ctrl+M")
         self.min_vswr_action.triggered.connect(lambda: self.plots.go_to_min_vswr())
         view_menu.addAction(self.min_vswr_action)
+
+        view_menu.addSeparator()
+
+        # Display only: markers, readouts and exports keep using the measured points.
+        self.smooth_action = QAction("&Smooth Curves", self)
+        self.smooth_action.setCheckable(True)
+        self.smooth_action.toggled.connect(self.set_smoothing)
+        view_menu.addAction(self.smooth_action)
 
         help_menu = self.menuBar().addMenu("&Help")
         about_action = QAction("&About", self)
@@ -210,6 +220,11 @@ class MainWindow(QMainWindow):
         )
         for action in self._data_actions():
             action.setEnabled(True)
+
+    def set_smoothing(self, enabled: bool) -> None:
+        """Switch curve smoothing on or off, and remember the choice."""
+        self.plots.set_smoothing(enabled)
+        self.settings.setValue(SMOOTH_KEY, enabled)
 
     def _data_actions(self) -> tuple[QAction, ...]:
         """Actions that need loaded data."""

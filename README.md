@@ -10,7 +10,8 @@ It replaces the LabVIEW-based Nano VNA LabVIEW Viewer and needs no LabVIEW, NI r
 ## Features
 
 - **Plots:** return loss, VSWR, phase, and a Smith chart (with an optional admittance-grid
-  overlay). Two-port data adds a Transmission tab for S21 magnitude and phase.
+  overlay). Two-port data adds a Transmission tab for S21 magnitude and phase. Optional curve
+  smoothing between the measured points.
 - **Marker:** click or drag to read frequency, S11, VSWR, and impedance (R + jX) at any point.
   The minimum-VSWR point is marked automatically.
 - **Live NanoVNA:** single or continuous sweeps over any range; save sweeps as Touchstone files.
@@ -67,6 +68,10 @@ sudo usermod -aG dialout $USER
 - Click a plot or drag the pink marker to read values at that point. The dashed green line marks
   the minimum VSWR; **View → Go to Minimum VSWR** (Ctrl+M) jumps back to it.
 - Scroll to zoom, drag to pan, **View → Reset Zoom** (Ctrl+0) to fit.
+- **View → Smooth Curves** draws a smooth curve through the measured points, which are then
+  shown as dots. It only changes how the line is drawn: the marker, the readouts, and exported
+  data always use the measured points. A feature narrower than the spacing between points
+  can't be recovered by smoothing; sweep a narrower range instead.
 - **File → Export Plot as PNG** (Ctrl+E) saves the current tab; **Export Data as CSV**
   (Ctrl+Shift+E) saves every point.
 

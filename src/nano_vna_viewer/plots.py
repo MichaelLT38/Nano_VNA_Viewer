@@ -2,6 +2,9 @@
 
 All plots share one marker. Clicking a plot or dragging its marker line moves the
 marker to the nearest measured point, and every plot plus the readout follows.
+
+Curve smoothing is optional and display-only: the line is drawn through interpolated
+values, while the marker and readout stay on the measured points.
 """
 
 from __future__ import annotations
@@ -22,7 +25,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .rf import impedance, min_vswr_index, phase_deg, s_db, vswr
+from .rf import impedance, interpolate_s, min_vswr_index, phase_deg, s_db, vswr
 from .touchstone import Measurement
 from .units import format_frequency, format_impedance
 
@@ -89,6 +92,7 @@ class FrequencyPlot(pg.PlotWidget):
         self.theme = theme
         self.frequency = np.empty(0)
         self.curve: pg.PlotDataItem | None = None
+        self.points: pg.PlotDataItem | None = None  # measured points, shown under a smoothed curve
 
         self.setTitle(title)
         self.setLabel("bottom", "Frequency", units="Hz")
@@ -120,23 +124,46 @@ class FrequencyPlot(pg.PlotWidget):
         self.marker_line.setZValue(11)
 
     def set_trace(
-        self, frequency: np.ndarray, y: np.ndarray, color: str, reset_view: bool = True
+        self,
+        frequency: np.ndarray,
+        y: np.ndarray,
+        color: str,
+        reset_view: bool = True,
+        smooth: tuple[np.ndarray, np.ndarray] | None = None,
     ) -> None:
         """Replace the trace. NaN values leave a gap.
 
         With ``reset_view=False`` the current zoom is kept (for repeated live sweeps).
+        ``smooth`` is an interpolated (frequency, y) pair to draw as the line instead;
+        the measured points are then shown as dots. The marker follows the measured
+        points either way.
         """
         self.clear_trace()
         self.frequency = frequency
-        self.curve = self.plot(frequency, y, pen=pg.mkPen(color, width=2), connect="finite")
+        line_x, line_y = (frequency, y) if smooth is None else smooth
+        self.curve = self.plot(line_x, line_y, pen=pg.mkPen(color, width=2), connect="finite")
+        if smooth is not None:
+            finite = np.isfinite(y)
+            # A PlotDataItem rather than a ScatterPlotItem, so the log VSWR axis applies.
+            self.points = self.plot(
+                frequency[finite],
+                y[finite],
+                pen=None,
+                symbol="o",
+                symbolSize=5,
+                symbolBrush=color,
+                symbolPen=None,
+            )
         self.marker_line.setVisible(True)
         if reset_view:
             self.reset_view()
 
     def clear_trace(self) -> None:
-        if self.curve is not None:
-            self.removeItem(self.curve)
-            self.curve = None
+        for item in (self.curve, self.points):
+            if item is not None:
+                self.removeItem(item)
+        self.curve = None
+        self.points = None
         self.marker_line.setVisible(False)
         self.reference_line.setVisible(False)
         self.frequency = np.empty(0)
@@ -208,6 +235,7 @@ class SmithChart(pg.PlotWidget):
         self.theme = theme
         self.gamma = np.empty(0, dtype=complex)
         self.curve: pg.PlotDataItem | None = None
+        self.points: pg.PlotDataItem | None = None  # measured points, shown under a smoothed curve
 
         self.setTitle("Smith Chart (S11)")
         self.setAspectLocked(True)
@@ -263,15 +291,33 @@ class SmithChart(pg.PlotWidget):
         for item in self.admittance_items:
             item.setVisible(visible)
 
-    def set_trace(self, s11: np.ndarray) -> None:
+    def set_trace(self, s11: np.ndarray, smooth: np.ndarray | None = None) -> None:
+        """Replace the trace.
+
+        ``smooth`` is an interpolated S11 to draw as the line instead; the measured
+        points are then shown as dots. The marker follows the measured points either way.
+        """
         self.clear_trace()
         self.gamma = s11
-        self.curve = self.plot(s11.real, s11.imag, pen=pg.mkPen(self.theme.s11, width=2))
+        line = s11 if smooth is None else smooth
+        self.curve = self.plot(line.real, line.imag, pen=pg.mkPen(self.theme.s11, width=2))
+        if smooth is not None:
+            self.points = self.plot(
+                s11.real,
+                s11.imag,
+                pen=None,
+                symbol="o",
+                symbolSize=5,
+                symbolBrush=self.theme.s11,
+                symbolPen=None,
+            )
 
     def clear_trace(self) -> None:
-        if self.curve is not None:
-            self.removeItem(self.curve)
-            self.curve = None
+        for item in (self.curve, self.points):
+            if item is not None:
+                self.removeItem(item)
+        self.curve = None
+        self.points = None
         self.marker_dot.clear()
         self.reference_dot.clear()
         self.gamma = np.empty(0, dtype=complex)
@@ -308,6 +354,12 @@ def format_vswr(value: float) -> str:
     return "∞" if np.isinf(value) else f"{value:.3f}"
 
 
+def finite_vswr(s11: np.ndarray) -> np.ndarray:
+    """VSWR for plotting: infinite values (total reflection) become NaN, a gap in the trace."""
+    swr = vswr(s11)
+    return np.where(np.isfinite(swr), swr, np.nan)
+
+
 class PlotPanel(QWidget):
     """Tabbed plots plus a readout line for the shared marker."""
 
@@ -320,6 +372,7 @@ class PlotPanel(QWidget):
         self.measurement: Measurement | None = None
         self.marker_index: int | None = None
         self.min_vswr_index: int | None = None
+        self.smoothing = False
 
         self.magnitude_plot = FrequencyPlot("Return Loss (S11)", "Magnitude", "dB", self.theme)
         # Log scale: VSWR runs from 1 to thousands near total reflection.
@@ -397,28 +450,54 @@ class PlotPanel(QWidget):
             and previous.points == m.points
         )
         self.measurement = m
-        f, t, reset = m.frequency_hz, self.theme, not keep_view
-        swr = vswr(m.s11)
+        self._draw_traces(reset=not keep_view)
 
-        self.magnitude_plot.set_trace(f, s_db(m.s11), t.s11, reset)
-        self.vswr_plot.set_trace(f, np.where(np.isfinite(swr), swr, np.nan), t.s11, reset)
-        self.phase_plot.set_trace(f, phase_deg(m.s11), t.s11, reset)
-        self.smith_chart.set_trace(m.s11)
-
-        if m.s21 is not None:
-            self.s21_magnitude_plot.set_trace(f, s_db(m.s21), t.s21, reset)
-            self.s21_phase_plot.set_trace(f, phase_deg(m.s21), t.s21, reset)
-        else:
-            self.s21_magnitude_plot.clear_trace()
-            self.s21_phase_plot.clear_trace()
-            if self.tabs.currentIndex() == TRANSMISSION_TAB:
-                self.tabs.setCurrentIndex(0)
+        if m.s21 is None and self.tabs.currentIndex() == TRANSMISSION_TAB:
+            self.tabs.setCurrentIndex(0)
         self.tabs.setTabVisible(TRANSMISSION_TAB, m.s21 is not None)
 
         self.min_vswr_index = min_vswr_index(m.s11)
         for plot in self.plots:
             plot.set_reference(self.min_vswr_index)
         self.set_marker(self.marker_index if keep_marker else self.min_vswr_index)
+
+    def _draw_traces(self, reset: bool) -> None:
+        """Draw every trace of the loaded measurement, smoothed if that is switched on."""
+        m, t = self.measurement, self.theme
+        f = m.frequency_hz
+        dense_s11 = interpolate_s(f, m.s11) if self.smoothing else None
+
+        def draw(plot, s, dense, quantity, color):
+            # The quantity is derived from the interpolated S-parameter, not interpolated itself.
+            smooth = None if dense is None else (dense[0], quantity(dense[1]))
+            plot.set_trace(f, quantity(s), color, reset, smooth)
+
+        draw(self.magnitude_plot, m.s11, dense_s11, s_db, t.s11)
+        draw(self.vswr_plot, m.s11, dense_s11, finite_vswr, t.s11)
+        draw(self.phase_plot, m.s11, dense_s11, phase_deg, t.s11)
+        self.smith_chart.set_trace(m.s11, None if dense_s11 is None else dense_s11[1])
+
+        if m.s21 is not None:
+            dense_s21 = interpolate_s(f, m.s21) if self.smoothing else None
+            draw(self.s21_magnitude_plot, m.s21, dense_s21, s_db, t.s21)
+            draw(self.s21_phase_plot, m.s21, dense_s21, phase_deg, t.s21)
+        else:
+            self.s21_magnitude_plot.clear_trace()
+            self.s21_phase_plot.clear_trace()
+
+    def set_smoothing(self, enabled: bool) -> None:
+        """Draw smooth interpolated curves, or straight lines between the measured points.
+
+        Display only: the marker, readout and minimum VSWR always use the measured points.
+        Zoom and marker are kept.
+        """
+        self.smoothing = enabled
+        if self.measurement is None:
+            return
+        self._draw_traces(reset=False)
+        for plot in self.plots:
+            plot.set_reference(self.min_vswr_index)
+        self.set_marker(self.marker_index)
 
     def go_to_min_vswr(self) -> None:
         if self.min_vswr_index is not None:
